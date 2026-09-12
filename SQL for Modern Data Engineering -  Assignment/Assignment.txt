@@ -1,0 +1,349 @@
+use CobbleData;
+
+/*Voltkart's commercial team wants a quick look at the biggest sales. Return the
+top 20 completed orders by value, with the customer and the sales rep behind each one. 
+Required output: 
+order_id, 
+order_date, 
+customer_name, 
+sales_rep_name, 
+order_total*/
+
+SELECT TOP 20 order_id, order_date, customer_name, employee_name AS sales_rep_name, order_total
+FROM dbo.fact_orders AS dfo 
+INNER JOIN dbo.dim_customer AS ddc
+ON dfo.customer_id = ddc.customer_id
+INNER JOIN dbo.dim_employee AS ddm
+ON dfo.sales_rep_id = ddm.employee_id
+WHERE dfo.order_status = 'Completed' /*Check whether the status is completed or not*/
+ORDER BY dfo.order_total DESC; /*Sorting of orders from higher to lower */
+
+
+/* Marketing wants to re-engage people who registered but never bought. List the
+customers who have never placed an order. Required output: 
+customer_id, 
+customer_name, 
+signup_date
+*/
+SELECT ddm.customer_id, customer_name, signup_date
+FROM dbo.dim_customer AS ddm
+LEFT JOIN dbo.fact_orders AS dfo
+ON ddm.customer_id = dfo.customer_id
+GROUP BY ddm.customer_id, ddm.customer_name, ddm.signup_date
+HAVING COUNT(dfo.order_id) = 0;
+
+/*
+ Merchandising wants the stars of each category. For every category, return the
+top 3 products by completed revenue. Required output: category_name, product_name,
+total_revenue, revenue_rank
+*/
+WITH product_revenue AS (
+	SELECT dp.product_id, dp.product_name, dp.category_id, SUM(foi.line_amount)  AS total_revenue
+	FROM dbo.fact_order_items AS foi
+	INNER JOIN dbo.fact_orders AS fo
+	ON foi.order_id = fo.order_id
+	INNER JOIN dbo.dim_product AS dp
+	ON foi.product_id = dp.product_id
+	GROUP BY dp.product_id,dp.product_name,dp.category_id
+),
+ranked_products AS (
+	SELECT 
+	product_id,
+	product_name,
+	category_id,
+	total_revenue,
+	RANK() OVER (PARTITION BY category_id ORDER BY total_revenue DESC) AS revenue_rank
+	FROM product_revenue
+)
+SELECT total_revenue, revenue_rank
+FROM ranked_products
+WHERE revenue_rank <= 3;
+
+
+/*Finance wants the revenue trend with momentum. Produce
+monthly completed revenue with a cumulative running total and the month-over-month % 
+change. Required output: 
+order_month (YYYY-MM), 
+monthly_revenue, 
+running_total, 
+mom_pct_change.*/
+WITH monthly_revenue_cte AS (
+    SELECT 
+        FORMAT(order_date, 'yyyy-MM') AS order_month,
+        SUM(order_total) AS monthly_revenue
+    FROM dbo.fact_orders
+    WHERE order_status = 'Completed'
+    GROUP BY FORMAT(order_date, 'yyyy-MM')
+)
+SELECT 
+    order_month,
+    monthly_revenue,
+    SUM(monthly_revenue) OVER (ORDER BY order_month
+	ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,
+    (monthly_revenue - LAG(monthly_revenue) OVER (ORDER BY order_month)) 
+  / LAG(monthly_revenue) OVER (ORDER BY order_month) * 100.0 AS mom_pct_change
+FROM monthly_revenue_cte
+ORDER BY order_month;
+
+/*The CRM team wants to size up the customer base by value. Split customers into
+four quartiles by lifetime completed spend, and for each quartile report how many 
+customers fall in it and their average spend. Required output: category_id
+customer_count, 
+avg_lifetime_spend*/
+
+WITH customer_spend AS (
+    SELECT 
+        customer_id, 
+        SUM(order_total) AS total_spent
+    FROM fact_orders
+    WHERE order_status = 'Completed'
+    GROUP BY customer_id
+),
+customer_quartile AS (
+    SELECT 
+        customer_id,
+        total_spent,
+        NTILE(4) OVER (ORDER BY total_spent DESC) AS spend_quartile
+    FROM customer_spend
+)
+SELECT 
+    spend_quartile,
+    COUNT(customer_id) AS customer_count,
+    AVG(total_spent) AS avg_lifetime_spend
+FROM customer_quartile
+GROUP BY spend_quartile
+ORDER BY spend_quartile;
+
+
+
+
+
+/*
+The catalogue team needs to see everything under a part of the tree. Using a
+recursive query, list all categories in the subtree rooted at 'Computers' at any depth, with 
+how deep each sits and a readable path from Computers. Required output: 
+category_id, 
+category_name, 
+depth_level, 
+category_path.
+*/
+
+WITH category_tree AS
+(
+    SELECT
+        category_id,
+        category_name,
+        parent_category_id,
+        0 AS depth_level,
+        CAST(category_name AS NVARCHAR(MAX)) AS category_path   -- ← only change needed
+    FROM dbo.dim_category
+    WHERE category_name = 'Computers'
+
+    UNION ALL
+
+    SELECT
+        c.category_id,
+        c.category_name,
+        c.parent_category_id,
+        ct.depth_level + 1,
+        ct.category_path + ' > ' + c.category_name    -- no CAST needed here, this line is fine as-is
+    FROM dbo.dim_category c
+    INNER JOIN category_tree ct
+        ON c.parent_category_id = ct.category_id
+)
+SELECT
+    category_id,
+    category_name,
+    depth_level,
+    category_path
+FROM category_tree
+ORDER BY depth_level, category_path
+OPTION (MAXRECURSION 100);
+
+/*
+Sales leadership wants performance rolled up the org chart. For every employee,
+compute the total completed order value generated by their whole team — that is, 
+themselves plus everyone reporting under them at any depth. A Sales Rep's team is just 
+themselves; a manager's is their entire subtree. Required output: 
+employee_id, 
+employee_name, 
+role, 
+team_total_revenue.*/
+
+WITH EmpHierarchy AS (
+    SELECT 
+        employee_id AS manager_root,
+        employee_id AS team_member_id
+    FROM dbo.dim_employee
+    UNION ALL
+    SELECT 
+        eh.manager_root,
+        e.employee_id
+    FROM EmpHierarchy eh
+    JOIN dbo.dim_employee e 
+        ON e.manager_id = eh.team_member_id
+)
+SELECT 
+    e.employee_id,
+    e.employee_name,
+    e.role,
+    ISNULL(SUM(fo.order_total), 0) AS team_total_revenue
+FROM dbo.dim_employee e
+LEFT JOIN EmpHierarchy eh 
+    ON eh.manager_root = e.employee_id
+LEFT JOIN dbo.fact_orders fo 
+    ON fo.sales_rep_id = eh.team_member_id
+    AND fo.order_status = 'Completed'
+GROUP BY 
+    e.employee_id, 
+    e.employee_name, 
+    e.role
+ORDER BY 
+    team_total_revenue DESC;
+
+/*
+ The platform team is moving off nightly full reloads. You've been handed today's
+batch in stg_orders_incr. Write a single MERGE that performs an incremental load into 
+fact_orders: update orders that changed, insert ones that are new. Acceptance criteria: one 
+MERGE statement; matched orders are updated (status and total) and new orders inserted; 
+include a verification query showing the 
+fact_orders row count before versus after and a 
+sample of updated rows.
+*/
+
+MERGE dbo.fact_orders AS target
+USING dbo.stg_orders_incr AS source
+    ON target.order_id = source.order_id
+
+WHEN MATCHED AND (
+        ISNULL(target.order_status, '') <> ISNULL(source.order_status, '')
+     OR ISNULL(target.order_total, -1) <> ISNULL(source.order_total, -1)
+) THEN
+    UPDATE SET
+        target.order_status = source.order_status,
+        target.order_total  = source.order_total
+
+WHEN NOT MATCHED BY TARGET THEN
+    INSERT (order_id, order_date, customer_id, sales_rep_id, order_status, order_total)
+    VALUES (source.order_id, source.order_date, source.customer_id,
+            source.sales_rep_id, source.order_status, source.order_total);
+
+/* The catalogue source now emits a change feed (
+operation codes. Apply it to 
+cdc_product_changes) with
+dim_product in a single MERGE that honours the codes: I inserts 
+a new product, U updates an existing one, D deletes it. Acceptance criteria: one MERGE 
+handling all three operations; include a verification query showing inserted, updated, and 
+deleted products*/
+
+MERGE dbo.dim_product AS target
+USING dbo.cdc_product_changes AS source
+    ON target.product_id = source.product_id
+
+WHEN MATCHED AND source.operation = 'D' THEN
+    DELETE
+
+WHEN MATCHED AND source.operation = 'U' THEN
+    UPDATE SET
+        target.product_name = source.product_name,
+        target.category_id  = source.category_id,
+        target.unit_price   = source.unit_price,
+        target.unit_cost    = source.unit_cost,
+        target.launch_date  = source.launch_date
+
+WHEN NOT MATCHED BY TARGET AND source.operation = 'I' THEN
+    INSERT (product_id, product_name, category_id, unit_price, unit_cost, launch_date)
+    VALUES (source.product_id, source.product_name, source.category_id,
+            source.unit_price, source.unit_cost, source.launch_date);
+
+/*
+A report is slow. Here is the query analysts are running:
+    SELECT o.customer_id, COUNT(*) AS orders_2024,
+           (SELECT SUM(oi.line_amount)
+              FROM fact_order_items oi
+              JOIN fact_orders o2 ON o2.order_id = oi.order_id
+             WHERE o2.customer_id = o.customer_id) AS lifetime_value
+    FROM fact_orders o
+    WHERE YEAR(o.order_date) = 2024
+    GROUP BY o.customer_id;
+Turn on 
+SET STATISTICS IO, TIME ON and "Include Actual Execution Plan", run it, then make 
+it fast: explain what the plan is doing, rewrite the query, and add an index that helps. Required 
+output: the rewritten query, the 
+CREATE INDEX statement(s), and a short note giving the 
+logical reads before versus after and why the plan changed.
+*/
+
+SELECT
+    o.customer_id,
+    COUNT(*) AS orders_2024,
+    (
+        SELECT SUM(oi.line_amount)
+        FROM fact_order_items oi
+        JOIN fact_orders o2
+            ON o2.order_id = oi.order_id
+        WHERE o2.customer_id = o.customer_id
+    ) AS lifetime_value
+FROM fact_orders o
+WHERE o.order_date >= '20240101'
+  AND o.order_date < '20250101'
+GROUP BY o.customer_id;
+
+
+
+/*
+ (Bonus) The retention team wants loyalty streaks. For each customer, find the
+longest run of consecutive calendar months in which they placed at least one completed 
+order. Required output: 
+customer_id, 
+customer_name, 
+longest_streak_months.
+*/
+
+
+WITH CustomerMonths AS (
+    SELECT DISTINCT
+        c.customer_id,
+        DATEFROMPARTS(YEAR(o.order_date), MONTH(o.order_date), 1) AS order_month
+    FROM dbo.fact_orders o
+    JOIN dbo.dim_customer c ON c.customer_id = o.customer_id
+    WHERE o.order_status = 'Completed'
+),
+
+NumberedMonths AS (
+    SELECT
+        customer_id,
+        order_month,
+        (YEAR(order_month) * 12 + MONTH(order_month)) AS month_index,
+        ROW_NUMBER() OVER (
+            PARTITION BY customer_id 
+            ORDER BY order_month
+        ) AS rn
+    FROM CustomerMonths
+),
+
+Islands AS (
+    SELECT
+        customer_id,
+        order_month,
+        (month_index - rn) AS island_group
+    FROM NumberedMonths
+),
+
+StreakLengths AS (
+    SELECT
+        customer_id,
+        island_group,
+        COUNT(*) AS streak_length
+    FROM Islands
+    GROUP BY customer_id, island_group
+)
+
+SELECT
+    c.customer_id,
+    c.customer_name,
+    ISNULL(MAX(s.streak_length), 0) AS longest_streak_months
+FROM dbo.dim_customer c
+LEFT JOIN StreakLengths s ON s.customer_id = c.customer_id
+GROUP BY c.customer_id, c.customer_name
+ORDER BY longest_streak_months DESC;

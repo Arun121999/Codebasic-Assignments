@@ -1,0 +1,535 @@
+*************************************************************
+Functions. Replace the copy-pasted inline price cleaning with a single clean_price(text) function, and add an apply_discount(price, percent) function so the discount is no longer a magic number inside the loop. Acceptance criteria: one used for every price; clean_price is apply_discount takes the percent as an argument; both work on the sample values.
+*************************************************************
+def clean_price(text):
+    """Turn a raw price string like ' 1,240 ' into a float (1240.0)."""
+    return float(text.replace(",", ""))
+
+
+def apply_discount(price, percent):
+    """Return price after subtracting `percent` percent."""
+    return price - price * percent / 100    
+
+
+************************************************************
+OOP. Model an order as an Order class with items, an add_item method, and a order_id, customer and total method. Build each order as an Order object and ask it for its total instead of summing inline. Acceptance criteria: the Order class holds the data and the actions; the order total comes from the object's total method.
+************************************************************
+class Order:
+    """Model a single customer order."""
+
+    def __init__(self, order_id, customer):
+        self.order_id = order_id
+        self.customer = customer
+        self.items = []        
+
+    def add_item(self, name, price):
+        # add one item row to this order
+        self.items.append((name, price))
+
+    def total(self):
+        # sum this order's items, then apply the discount
+        total = 0
+        for name, price in self.items:
+            total = total + clean_price(price)      # reuse task 1's cleaner
+        return apply_discount(total, 10)             # reuse task 1's discount
+
+
+# build each order as an Order object
+orders = {}
+for row in rows:
+    oid = row["order_id"]
+    if oid not in orders:
+        orders[oid] = Order(oid, row["customer"])
+    orders[oid].add_item(row["item_name"], row["item_price"])
+
+for oid, o in orders.items():
+    print("saving order", oid, "for", o.customer, "total", o.total())
+
+**************************************************************
+Modules and packages. Split the script into a loafly package with one job per module (config, models, extract, transform, load) and a run_pipeline.py runner that imports from them and runs extract, then transform, then load. Acceptance criteria: the package has an __init__.py; each module does one job; run_pipeline.py orchestrates the run and the imports work
+**************************************************************
+
+# ============================================================
+# loafly/__init__.py
+# ============================================================
+
+# ============================================================
+# loafly/config.py
+# ============================================================
+
+RAW_ORDERS_PATH = "raw_orders.csv"
+DISCOUNT_PERCENT = 10
+
+
+# ============================================================
+# loafly/models.py
+# ============================================================
+
+
+class Order:
+    def __init__(self, order_id, customer):
+        self.order_id = order_id
+        self.customer = customer
+        self.items = []
+
+    def add_item(self, name, price):
+        self.items.append((name, price))
+
+    def total(self):
+        # lazy import avoids circular import between models and transform
+        from loafly.transform import clean_price, apply_discount
+        from loafly.config import DISCOUNT_PERCENT
+
+        total = 0
+        for name, price in self.items:
+            total = total + clean_price(price)
+        return apply_discount(total, DISCOUNT_PERCENT)
+
+
+# ============================================================
+# loafly/extract.py
+# ============================================================
+"""Extract: read raw rows from CSV."""
+import csv
+
+from loafly.config import RAW_ORDERS_PATH
+
+
+def extract_rows(path=RAW_ORDERS_PATH):
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+# ============================================================
+# loafly/transform.py
+# ============================================================
+"""Transform: clean prices, apply discount, build Orders."""
+from loafly.models import Order
+
+
+def clean_price(text):
+    return float(text.replace(",", ""))
+
+
+def apply_discount(price, percent):
+    return price - price * percent / 100
+
+
+def build_orders(rows):
+    orders = {}
+    for row in rows:
+        oid = row["order_id"]
+        if oid not in orders:
+            orders[oid] = Order(oid, row["customer"])
+        orders[oid].add_item(row["item_name"], row["item_price"])
+    return orders
+
+
+# ============================================================
+# loafly/load.py
+# ============================================================
+"""Load: emit finished totals."""
+
+
+def save_orders(orders):
+    for oid, o in orders.items():
+        print("saving order", oid, "for", o.customer, "total", o.total())
+
+
+# ============================================================
+# run_pipeline.py
+# ============================================================
+"""Runner: extract -> transform -> load."""
+from loafly.extract import extract_rows
+from loafly.transform import build_orders
+from loafly.load import save_orders
+
+
+def main():
+    rows = extract_rows()
+    orders = build_orders(rows)
+    save_orders(orders)
+
+
+if __name__ == "__main__":
+    main()
+
+***************************************************************
+Config-driven design. Move every setting (currency, discount percent, input file path, retry count) into one config place and read from it. Remove the magic numbers and the hard-coded path from the logic. Acceptance criteria: no magic numbers or file paths remain in the logic; changing a value in config changes behaviour without editing any other file.
+***************************************************************
+
+
+# ============================================================
+# loafly/__init__.py
+# ============================================================
+"""Loafly orders pipeline package."""
+
+
+# ============================================================
+# loafly/config.py
+# ============================================================
+"""Config: the single place for every setting."""
+
+CURRENCY = "INR"              # currency symbol/label used in output
+DISCOUNT_PERCENT = 10         # percent discount applied to each order
+RAW_ORDERS_PATH = "raw_orders.csv"   # input file path
+RETRY_COUNT = 3               # attempts when calling the orders API
+
+
+# ============================================================
+# loafly/models.py
+# ============================================================
+"""Model: the Order class."""
+
+
+class Order:
+    def __init__(self, order_id, customer):
+        self.order_id = order_id
+        self.customer = customer
+        self.items = []
+
+    def add_item(self, name, price):
+        self.items.append((name, price))
+
+    def total(self):
+        # lazy import avoids circular import between models and transform
+        from loafly.transform import clean_price, apply_discount
+        from loafly.config import DISCOUNT_PERCENT
+
+        total = 0
+        for name, price in self.items:
+            total = total + clean_price(price)
+        return apply_discount(total, DISCOUNT_PERCENT)
+
+
+# ============================================================
+# loafly/extract.py
+# ============================================================
+"""Extract: read raw rows from CSV."""
+import csv
+
+from loafly.config import RAW_ORDERS_PATH
+
+
+def extract_rows(path=RAW_ORDERS_PATH):
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+# ============================================================
+# loafly/transform.py
+# ============================================================
+"""Transform: clean prices, apply discount, build Orders."""
+from loafly.models import Order
+
+
+def clean_price(text):
+    return float(text.replace(",", ""))
+
+
+def apply_discount(price, percent):
+    return price - price * percent / 100
+
+
+def build_orders(rows):
+    orders = {}
+    for row in rows:
+        oid = row["order_id"]
+        if oid not in orders:
+            orders[oid] = Order(oid, row["customer"])
+        orders[oid].add_item(row["item_name"], row["item_price"])
+    return orders
+
+
+# ============================================================
+# loafly/load.py
+# ============================================================
+"""Load: emit finished totals."""
+from loafly.config import CURRENCY
+
+
+def save_orders(orders):
+    for oid, o in orders.items():
+        print("saving order", oid, "for", o.customer,
+              "total", o.total(), CURRENCY)
+
+
+# ============================================================
+# run_pipeline.py
+# ============================================================
+"""Runner: extract -> transform -> load."""
+from loafly.extract import extract_rows
+from loafly.transform import build_orders
+from loafly.load import save_orders
+
+
+def main():
+    rows = extract_rows()
+    orders = build_orders(rows)
+    save_orders(orders)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+**********************************************************
+Logging and exception handling. Replace every print with try/logging at the right level (info, warning, error), timestamped and also written to a log file. Wrap the price parsing in except/finally so an item with a missing price is skipped with a warning and the run keeps going. Acceptance criteria: no print calls remain; a log file is produced; the three missing-price items are skipped with a warning; the run completes over all orders.
+**********************************************************
+
+"""
+legacy_orders.py
+"""
+import csv
+import logging
+
+LOG_FILE = "orders.log"
+
+# log to both the console and a file, with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger("legacy_orders")
+
+
+def load_rows(path):
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except OSError:
+        logger.error("couldn't open %s", path, exc_info=True)
+        raise
+    logger.info("loaded %d rows from %s", len(rows), path)
+    return rows
+
+
+def group_by_order(rows):
+    # multiple csv rows -> one dict per order_id
+    orders = {}
+    for row in rows:
+        oid = row["order_id"]
+        if oid not in orders:
+            orders[oid] = {"customer": row["customer"], "items": []}
+        orders[oid]["items"].append((row["item_name"], row["item_price"]))
+    logger.info("grouped into %d orders", len(orders))
+    return orders
+
+
+def parse_price(raw_price):
+    # handles the " 1,240" style values in the sheet - strip commas,
+    # float() takes care of the whitespace on its own
+    return float(raw_price.replace(",", ""))
+
+
+def process_orders(orders):
+    processed = 0
+    skipped = 0
+    for oid, order in orders.items():
+        total = 0.0
+        for name, price in order["items"]:
+            try:
+                item_total = parse_price(price)
+            except (ValueError, AttributeError):
+                # empty string, None, junk text - skip this one item
+                # and keep going, don't lose the whole order over it
+                logger.warning("order %s: skipping '%s', bad price %r", oid, name, price)
+                skipped += 1
+                continue
+            finally:
+                pass  # nothing to clean up, just here per the assignment spec
+            total += item_total
+        total -= total * 10 / 100  # 10% discount
+        api_key = "loafly-prod-key-9f3a21"  # TODO: move to .env, not part of this task
+        logger.info("saved order %s for %s - total %.2f", oid, order["customer"], total)
+        processed += 1
+    logger.info("done: %d orders processed, %d items skipped", processed, skipped)
+
+
+def main():
+    rows = load_rows("raw_orders.csv")
+    orders = group_by_order(rows)
+    process_orders(orders)
+
+
+if __name__ == "__main__":
+    main()
+
+**********************************************************
+Retry, environments and secrets. Wrap the provided call in a retry (a few attempts with a short wait, then give up and log an error). Read the API key with os.getenv instead of hard-coding it, with a .env that is git-ignored and an env.example committed in its place. Add a requirements.txt and a short README that documents the virtual-environment setup. Acceptance criteria: the save is retried before giving up; the key is read from the environment, not the code; .gitignore excludes .env; requirements.txt and a README are present.
+**********************************************************
+
+# ============================================================
+# FILE: legacy_orders.py
+# ============================================================
+
+"""
+legacy_orders.py
+"""
+import csv
+import logging
+import os
+import time
+
+from dotenv import load_dotenv      # reads the .env file into the environment
+
+from gateway import save_to_orders_api   # the flaky API client we're calling
+
+LOG_FILE = "orders.log"
+MAX_ATTEMPTS = 3            # how many times to try saving one order
+RETRY_DELAY_SECONDS = 1     # short pause between attempts
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger("legacy_orders")
+
+load_dotenv()  # pulls LOAFLY_API_KEY (and anything else) in from .env, if present
+API_KEY = os.getenv("LOAFLY_API_KEY")  # never hardcode this - read it from env
+
+
+def load_rows(path):
+    # this one really should stop the run if it fails - no point
+    # continuing with no data at all
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except OSError:
+        logger.error("couldn't open %s", path, exc_info=True)
+        raise
+    logger.info("loaded %d rows from %s", len(rows), path)
+    return rows
+
+
+def group_by_order(rows):
+    # multiple csv rows -> one dict per order_id
+    orders = {}
+    for row in rows:
+        oid = row["order_id"]
+        if oid not in orders:
+            orders[oid] = {"customer": row["customer"], "items": []}
+        orders[oid]["items"].append((row["item_name"], row["item_price"]))
+    logger.info("grouped into %d orders", len(orders))
+    return orders
+
+
+def parse_price(raw_price):
+    return float(raw_price.replace(",", ""))
+
+
+def save_with_retry(order_id, total):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            return save_to_orders_api(order_id, total)
+        except ConnectionError as e:
+            logger.warning(
+                "order %s: save attempt %d/%d failed - %s",
+                order_id, attempt, MAX_ATTEMPTS, e,
+            )
+            if attempt < MAX_ATTEMPTS:
+                time.sleep(RETRY_DELAY_SECONDS)
+
+
+def process_orders(orders):
+    processed = 0
+    skipped_items = 0
+    failed_saves = 0
+
+    for oid, order in orders.items():
+        total = 0.0
+        for name, price in order["items"]:
+            try:
+                item_total = parse_price(price)
+            except (ValueError, AttributeError):
+                logger.warning("order %s: skipping '%s', bad price %r", oid, name, price)
+                skipped_items += 1
+                continue
+            finally:
+                pass  # nothing to clean up, just here per the assignment spec
+            total += item_total
+
+        total -= total * 10 / 100  # 10% discount
+
+        result = save_with_retry(oid, total)
+        if result is None:
+            failed_saves += 1
+        else:
+            logger.info("saved order %s for %s - total %.2f", oid, order["customer"], total)
+        processed += 1
+
+    logger.info(
+        "done: %d orders processed, %d items skipped, %d saves failed",
+        processed, skipped_items, failed_saves,
+    )
+
+
+def main():
+    if not API_KEY:
+        logger.error("LOAFLY_API_KEY is not set - copy env.example to .env and fill it in")
+        raise SystemExit(1)
+    rows = load_rows("raw_orders.csv")
+    orders = group_by_order(rows)
+    process_orders(orders)
+
+
+if __name__ == "__main__":
+    main()
+
+
+# ============================================================
+# FILE: .gitignore
+# ============================================================
+
+.env
+__pycache__/
+*.pyc
+orders.log
+.venv/
+
+
+# ============================================================
+# FILE: env.example
+# (committed template - shows what keys are needed, no real values)
+# ============================================================
+
+LOAFLY_API_KEY=replace-with-your-key
+
+
+# ============================================================
+# FILE: requirements.txt
+# ============================================================
+
+
+
+# ============================================================
+# FILE: README.md
+# ============================================================
+
+# Loafly Orders Processor
+
+## Setup
+
+1. Create and activate a virtual environment:
+
+   python3 -m venv .venv
+   source .venv/bin/activate
+
+2. Install dependencies:
+
+   pip install -r requirements.txt
+
+## Run
+
+   python legacy_orders.py

@@ -1,0 +1,675 @@
+**************************************************************************************
+1> State the grain of the sales fact you will build, written as a comment, and classify every candidate column from bronze_bookings (joined to its flight) as a dimension key or a measure. Add one sentence naming which measures are additive and giving one example of a value that would not be additive. Acceptance criteria: a clear one-row grain statement; a correct split of columns into dimension keys versus measures; one additive versus-non-additive note.
+***************************************************************************************
+
+-- Grain: one row = one ticket on one flight (one booking)
+-- i.e. every row in the fact table is a single passenger's single booking for a single flight
+
+Dimension keys (from bronze_bookings):
+- booking_id -> degenerate dimension, identifies the row itself, no separate dim table for it
+- passenger_id -> who, links to dim_passenger
+- flight_id -> what, links to dim_flight
+- booking_date -> when, links to dim_date (role: date booked)
+- travel_date -> when, links to dim_date (role: date traveled)
+- fare_class -> what, Economy/Business etc, links to dim_fare_class
+- booking_status -> what, Confirmed/Cancelled etc, links to dim_booking_status
+
+Dimension keys (from bronze_flights, joined in):
+- flight_number -> what, which dim_flight
+- origin_airport_code -> where, links to dim_airport (role: origin)
+- dest_airport_code -> where, links to dim_airport (role: destination)
+- aircraft_code -> what, links to dim_aircraft
+- flight_date -> when, links to dim_date (role: flight date)
+
+Measures (from bronze_bookings):
+- fare_amount
+- tax_amount
+- miles_earned
+
+Additive vs non-additive: 
+
+Additive: Fare_amount, tax_amount and miles_earned are all additive, they can be summed across passengers, routes, dates, fare class etc and the total still means something (e.g total revenue). 
+
+Non-Additive: A non-additive example would be something like fare per mile (fare_amount / miles_earned), summing that ratio across bookings gives a meaningless number, you'd have to sum fare_amount and miles_earned separately first and then divide.
+
+
+
+*******************************************************************************
+2>Create a dw schema and write the star schema DDL: a centralFactTicketSales at your declared grain plus the dimensions it needs (date, passenger, flight, airport, aircraft). Use surrogate keys on the dimensions and foreign keys on the fact, and keep only additive measures on the fact. Acceptance criteria: fact at the declared grain with surrogate-key foreign keys; each dimension has a surrogate primary key and keeps its business key.
+*******************************************************************************
+
+
+-- =========================================================
+-- Star schema for flight ticket sales
+-- Grain of FactTicketSales: one row = one ticket on one flight (one booking)
+-- =========================================================
+
+CREATE SCHEMA dw;
+GO
+
+-- ---------------------------------------------------------
+-- DIMENSION: DimDate
+-- Business key: FullDate
+-- ---------------------------------------------------------
+CREATE TABLE dw.DimDate (
+    DateKey        INT PRIMARY KEY,
+  FullDate       DATE NOT NULL UNIQUE,             -- business key
+  DayOfMonth     TINYINT,
+  MonthNumber    TINYINT,
+  MonthName      NVARCHAR(20),
+  Quarter        TINYINT,
+  Year           SMALLINT,
+  DayOfWeekName  NVARCHAR(20),
+  IsWeekend      BIT
+);
+GO
+
+-- ---------------------------------------------------------
+-- DIMENSION: DimPassenger
+-- Business key: PassengerId
+-- ---------------------------------------------------------
+CREATE TABLE dw.DimPassenger (
+  PassengerKey        INT IDENTITY(1,1) PRIMARY KEY,   -- surrogate key
+  PassengerId          BIGINT NOT NULL UNIQUE,          -- business key
+  PassengerName        NVARCHAR(255),
+  HomeAirportCode      NVARCHAR(10),
+  FrequentFlyerTier    NVARCHAR(50),
+  SignupDate           DATE
+);
+GO
+
+-- ---------------------------------------------------------
+-- DIMENSION: DimAirport
+-- Business key: AirportCode
+-- Role-plays twice on the fact: origin and destination
+-- ---------------------------------------------------------
+CREATE TABLE dw.DimAirport (
+  AirportKey    INT IDENTITY(1,1) PRIMARY KEY,   -- surrogate key
+  AirportCode   NVARCHAR(10) NOT NULL UNIQUE,     -- business key
+  AirportName   NVARCHAR(255),
+  City          NVARCHAR(255),
+  Country       NVARCHAR(255),
+  Region        NVARCHAR(255)
+);
+GO
+
+-- ---------------------------------------------------------
+-- DIMENSION: DimAircraft
+-- Business key: AircraftCode
+-- ---------------------------------------------------------
+CREATE TABLE dw.DimAircraft (
+  AircraftKey    INT IDENTITY(1,1) PRIMARY KEY,   -- surrogate key
+  AircraftCode   NVARCHAR(10) NOT NULL UNIQUE,     -- business key
+  Model          NVARCHAR(255),
+  Manufacturer   NVARCHAR(255),
+  SeatCapacity   BIGINT
+);
+GO
+
+-- ---------------------------------------------------------
+-- DIMENSION: DimFlight
+-- Business key: FlightId
+-- ---------------------------------------------------------
+CREATE TABLE dw.DimFlight (
+  FlightKey            INT IDENTITY(1,1) PRIMARY KEY,   -- surrogate key
+  FlightId             BIGINT NOT NULL UNIQUE,           -- business key
+  FlightNumber         NVARCHAR(20),
+  OriginAirportCode    NVARCHAR(10),
+  DestAirportCode      NVARCHAR(10),
+  AircraftCode         NVARCHAR(10),
+  FlightDate           DATE
+);
+GO
+
+-- ---------------------------------------------------------
+-- FACT: FactTicketSales
+-- Grain: one row = one ticket on one flight (one booking)
+-- Only additive measures live here
+-- ---------------------------------------------------------
+CREATE TABLE dw.FactTicketSales (
+  TicketSalesKey    BIGINT IDENTITY(1,1) PRIMARY KEY,     -- surrogate key for fact row
+  BookingId         BIGINT NOT NULL UNIQUE,                -- degenerate dimension / business key of grain
+
+  -- dimension foreign keys, all surrogate keys
+  PassengerKey        INT NOT NULL FOREIGN KEY REFERENCES dw.DimPassenger(PassengerKey),
+  FlightKey           INT NOT NULL FOREIGN KEY REFERENCES dw.DimFlight(FlightKey),
+  OriginAirportKey    INT NOT NULL FOREIGN KEY REFERENCES dw.DimAirport(AirportKey),
+  DestAirportKey      INT NOT NULL FOREIGN KEY REFERENCES dw.DimAirport(AirportKey),
+  AircraftKey         INT NOT NULL FOREIGN KEY REFERENCES dw.DimAircraft(AircraftKey),
+  BookingDateKey      INT NOT NULL FOREIGN KEY REFERENCES dw.DimDate(DateKey),
+  TravelDateKey       INT NOT NULL FOREIGN KEY REFERENCES dw.DimDate(DateKey),
+
+  -- low-cardinality flags kept directly on the fact
+  FareClass         NVARCHAR(50),
+  BookingStatus     NVARCHAR(50),
+
+  -- additive measures only
+  FareAmount     DECIMAL(18,2),
+  TaxAmount      DECIMAL(18,2),
+  MilesEarned    BIGINT
+);
+GO
+
+
+****************************************************************************************
+Load the dimensions and the fact from the bronze_* tables, assigning the surrogate keys. Build a DimDate with a yyyymmdd integer DateKey. Populate the fact by joining bookings to the dimensions on their business keys. Acceptance criteria: dimensions and fact are populated; the fact row count matches bronze_bookings; every fact row resolves to all of its dimensions
+******************************************************************************************
+
+-- Populate DimDate with yyyymmdd integer key
+INSERT INTO dw.DimDate (DateKey, FullDate, DayOfMonth, MonthNumber, MonthName, Quarter, Year, DayOfWeekName, IsWeekend)
+SELECT
+  CAST(FORMAT(d, 'yyyyMMdd') AS INT),
+  d,
+  DAY(d),
+  MONTH(d),
+  DATENAME(MONTH, d),
+  DATEPART(QUARTER, d),
+  YEAR(d),
+  DATENAME(WEEKDAY, d),
+  CASE WHEN DATENAME(WEEKDAY, d) IN ('Saturday','Sunday') THEN 1 ELSE 0 END
+FROM (
+  SELECT booking_date AS d FROM bronze_bookings
+  UNION SELECT travel_date FROM bronze_bookings
+  UNION SELECT flight_date FROM bronze_flights
+) AS all_dates
+WHERE d IS NOT NULL;
+GO
+
+-- Populate DimPassenger
+INSERT INTO dw.DimPassenger (PassengerId, PassengerName, HomeAirportCode, FrequentFlyerTier, SignupDate)
+SELECT passenger_id, passenger_name, home_airport_code, frequent_flyer_tier, signup_date
+FROM bronze_passengers;
+GO
+
+--Populate DimAirport
+INSERT INTO dw.DimAirport (AirportCode, AirportName, City, Country, Region)
+SELECT airport_code, airport_name, city, country, region
+FROM bronze_airports;
+GO
+
+--Populate DimAircraft
+INSERT INTO dw.DimAircraft (AircraftCode, Model, Manufacturer, SeatCapacity)
+SELECT aircraft_code, model, manufacturer, seat_capacity
+FROM bronze_aircraft;
+GO
+
+--Populate DimFlight
+INSERT INTO dw.DimFlight (FlightId, FlightNumber, OriginAirportCode, DestAirportCode, AircraftCode, FlightDate)
+SELECT flight_id, flight_number, origin_airport_code, dest_airport_code, aircraft_code, flight_date
+FROM bronze_flights;
+GO
+
+--Populate FactTicketSales by joining bookings to flights, then resolving each dimension on its business key
+INSERT INTO dw.FactTicketSales (
+  BookingId, PassengerKey, FlightKey, OriginAirportKey, DestAirportKey,
+  AircraftKey, BookingDateKey, TravelDateKey, FareClass, BookingStatus,
+  FareAmount, TaxAmount, MilesEarned
+)
+SELECT
+  b.booking_id,
+  dp.PassengerKey,
+  df.FlightKey,
+  doa.AirportKey,
+  dda.AirportKey,
+  dac.AircraftKey,
+  CAST(FORMAT(b.booking_date, 'yyyyMMdd') AS INT),
+  CAST(FORMAT(b.travel_date, 'yyyyMMdd') AS INT),
+  b.fare_class,
+  b.booking_status,
+  b.fare_amount,
+  b.tax_amount,
+  b.miles_earned
+FROM bronze_bookings b
+INNER JOIN bronze_flights fl   ON b.flight_id = fl.flight_id
+INNER JOIN dw.DimPassenger dp  ON b.passenger_id = dp.PassengerId
+INNER JOIN dw.DimFlight df     ON b.flight_id = df.FlightId
+INNER JOIN dw.DimAirport doa   ON fl.origin_airport_code = doa.AirportCode
+INNER JOIN dw.DimAirport dda   ON fl.dest_airport_code = dda.AirportCode
+INNER JOIN dw.DimAircraft dac  ON fl.aircraft_code = dac.AircraftCode;
+GO
+
+--Verify acceptance criteria
+SELECT
+  (SELECT COUNT(*) FROM bronze_bookings) AS bronze_count,
+  (SELECT COUNT(*) FROM dw.FactTicketSales) AS fact_count;
+
+SELECT COUNT(*) AS rows_with_missing_dim
+FROM dw.FactTicketSales
+WHERE PassengerKey IS NULL OR FlightKey IS NULL OR OriginAirportKey IS NULL
+   OR DestAirportKey IS NULL OR AircraftKey IS NULL
+   OR BookingDateKey IS NULL OR TravelDateKey IS NULL;
+
+Reference: Assignment-2-Reference--Question-3, Assignment-2-Reference-Question-3
+
+
+****************************************************************************
+Snowflake the geography. Normalise the airport dimension into three linked tables: airport, city, and country. Load them, and write one sentence on the trade-off you are making. Acceptance criteria: three linked tables with foreign keys; a query can resolve an airport all the way up to its country.
+****************************************************************************
+
+
+CREATE TABLE dw.DimCountry (
+  CountryKey    INT IDENTITY(1,1) PRIMARY KEY,
+  CountryName   NVARCHAR(255) NOT NULL UNIQUE
+);
+GO
+
+CREATE TABLE dw.DimCity (
+  CityKey       INT IDENTITY(1,1) PRIMARY KEY,
+  CityName      NVARCHAR(255) NOT NULL,
+  Region        NVARCHAR(255),
+  CountryKey    INT NOT NULL FOREIGN KEY REFERENCES dw.DimCountry(CountryKey),
+  CONSTRAINT UQ_DimCity_CityCountry UNIQUE (CityName, CountryKey)
+);
+GO
+
+CREATE TABLE dw.DimAirportSnowflake (
+  AirportKey    INT IDENTITY(1,1) PRIMARY KEY,
+  AirportCode   NVARCHAR(10) NOT NULL UNIQUE,
+  AirportName   NVARCHAR(255),
+  CityKey       INT NOT NULL FOREIGN KEY REFERENCES dw.DimCity(CityKey)
+);
+GO
+
+-- =========================================================
+-- Load, top-down: Country -> City -> Airport
+-- =========================================================
+
+INSERT INTO dw.DimCountry (CountryName)
+SELECT DISTINCT country
+FROM bronze_airports
+WHERE country IS NOT NULL;
+GO
+
+INSERT INTO dw.DimCity (CityName, Region, CountryKey)
+SELECT DISTINCT ba.city, ba.region, dc.CountryKey
+FROM bronze_airports ba
+INNER JOIN dw.DimCountry dc ON ba.country = dc.CountryName
+WHERE ba.city IS NOT NULL;
+GO
+
+INSERT INTO dw.DimAirportSnowflake (AirportCode, AirportName, CityKey)
+SELECT ba.airport_code, ba.airport_name, dcity.CityKey
+FROM bronze_airports ba
+INNER JOIN dw.DimCountry dc   ON ba.country = dc.CountryName
+INNER JOIN dw.DimCity dcity   ON ba.city = dcity.CityName AND dcity.CountryKey = dc.CountryKey;
+GO
+
+-- =========================================================
+-- Verify: resolve an airport all the way up to its country
+-- =========================================================
+SELECT
+  a.AirportCode,
+  a.AirportName,
+  c.CityName,
+  c.Region,
+  co.CountryName
+FROM dw.DimAirportSnowflake a
+JOIN dw.DimCity c     ON a.CityKey = c.CityKey
+JOIN dw.DimCountry co ON c.CountryKey = co.CountryKey
+ORDER BY co.CountryName, c.CityName, a.AirportCode;
+
+Reference: Assignment-2-Reference--Question-4
+
+
+****************************************************************************
+Rebuild the passenger dimension as Slowly Changing Dimension Type 2 (a new surrogate key per version, the stable business key, is_current, effective_to). Apply effective_from, stg_passenger_updates so that a changed tier or home airport expires the old version and opens a new one, and brand-new passengers are inserted. Acceptance criteria: the two-step expire-then-insert pattern is used; a passenger who changed shows two versions with correct is_current and effective dates; new passengers appear as a single current row.
+****************************************************************************
+
+-- =======================================================
+-- Add SCD2 columns
+-- =======================================================
+USE [flights_db]
+GO
+
+-- Add EffectiveFrom column if it does not already exist
+IF COL_LENGTH('dw.DimPassenger', 'EffectiveFrom') IS NULL
+    ALTER TABLE dw.DimPassenger ADD EffectiveFrom DATE NULL;
+GO
+
+-- Add EffectiveTo column if it does not already exist
+IF COL_LENGTH('dw.DimPassenger', 'EffectiveTo') IS NULL
+    ALTER TABLE dw.DimPassenger ADD EffectiveTo DATE NULL;
+GO
+
+-- Add IsCurrent column if it does not already exist
+-- Default value is 1, meaning the record is currently active
+IF COL_LENGTH('dw.DimPassenger', 'IsCurrent') IS NULL
+    ALTER TABLE dw.DimPassenger ADD IsCurrent BIT NOT NULL CONSTRAINT DF_DimPassenger_IsCurrent DEFAULT (1);
+GO
+
+-- Populate EffectiveFrom for existing records
+-- Use SignupDate if available; otherwise use 1900-01-01
+-- Set IsCurrent to 1 for records where it is NULL
+UPDATE dw.DimPassenger
+SET EffectiveFrom = ISNULL(EffectiveFrom, ISNULL(SignupDate, CAST('1900-01-01' AS DATE))),
+    IsCurrent      = ISNULL(IsCurrent, 1)
+WHERE EffectiveFrom IS NULL OR IsCurrent IS NULL;
+GO
+
+-- Change EffectiveFrom from nullable to NOT NULL
+-- This is done after populating all existing NULL values
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dw.DimPassenger') AND name = 'EffectiveFrom' AND is_nullable = 1)
+    ALTER TABLE dw.DimPassenger ALTER COLUMN EffectiveFrom DATE NOT NULL;
+GO
+
+-- Variable to store the name of the existing unique constraint
+DECLARE @uqName sysname;
+
+-- Find the unique constraint defined on PassengerId
+SELECT @uqName = kc.name
+FROM sys.key_constraints kc
+JOIN sys.tables  t   ON kc.parent_object_id = t.object_id
+JOIN sys.schemas s   ON t.schema_id = s.schema_id
+JOIN sys.index_columns ic ON ic.object_id = t.object_id AND ic.index_id = kc.unique_index_id
+JOIN sys.columns c   ON c.object_id = t.object_id AND c.column_id = ic.column_id
+WHERE s.name = 'dw' AND t.name = 'DimPassenger' AND kc.type = 'UQ' AND c.name = 'PassengerId';
+
+-- Drop the existing unique constraint if it exists
+IF @uqName IS NOT NULL
+    EXEC('ALTER TABLE dw.DimPassenger DROP CONSTRAINT [' + @uqName + ']');
+GO
+
+-- Create a unique filtered index on PassengerId
+-- This allows only one current version (IsCurrent = 1)
+-- Multiple historical versions can exist for the same PassengerId
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('dw.DimPassenger') AND name = 'UQ_DimPassenger_CurrentVersion')
+    CREATE UNIQUE NONCLUSTERED INDEX UQ_DimPassenger_CurrentVersion
+    ON dw.DimPassenger (PassengerId)
+    WHERE IsCurrent = 1;
+GO
+
+-- =======================================================
+-- SCD2 Load
+-- =======================================================
+
+DECLARE @Today DATE = CAST(GETDATE() AS DATE);
+DECLARE @MergeOut TABLE (Action NVARCHAR(10), PassengerId BIGINT);
+
+BEGIN TRANSACTION;
+
+    -- PASS 1: expire changed current rows, insert brand-new passengers
+    MERGE dw.DimPassenger AS tgt
+    USING dbo.stg_passenger_updates AS src
+        ON tgt.PassengerId = src.passenger_id
+       AND tgt.IsCurrent   = 1
+    WHEN MATCHED AND (
+            ISNULL(tgt.FrequentFlyerTier, N'') <> ISNULL(src.frequent_flyer_tier, N'')
+         OR ISNULL(tgt.HomeAirportCode,   N'') <> ISNULL(src.home_airport_code,   N'')
+         )
+        THEN UPDATE SET
+            tgt.IsCurrent   = 0,
+            tgt.EffectiveTo = DATEADD(DAY, -1, @Today)
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (PassengerId, PassengerName, HomeAirportCode, FrequentFlyerTier,
+                SignupDate, EffectiveFrom, EffectiveTo, IsCurrent)
+        VALUES (src.passenger_id, src.passenger_name, src.home_airport_code, src.frequent_flyer_tier,
+                NULL, @Today, NULL, 1)
+    OUTPUT $action, COALESCE(inserted.PassengerId, deleted.PassengerId)
+    INTO @MergeOut (Action, PassengerId);
+
+    -- PASS 2: open a new current version for every passenger expired above
+    INSERT INTO dw.DimPassenger
+        (PassengerId, PassengerName, HomeAirportCode, FrequentFlyerTier,
+         SignupDate, EffectiveFrom, EffectiveTo, IsCurrent)
+    SELECT
+        s.passenger_id, s.passenger_name, s.home_airport_code, s.frequent_flyer_tier,
+        prior.SignupDate, @Today, NULL, 1
+    FROM dbo.stg_passenger_updates s
+    INNER JOIN @MergeOut m
+        ON m.PassengerId = s.passenger_id
+       AND m.Action = 'UPDATE'
+    INNER JOIN dw.DimPassenger prior
+        ON prior.PassengerId = s.passenger_id
+       AND prior.IsCurrent   = 0
+       AND prior.EffectiveTo = DATEADD(DAY, -1, @Today);
+
+COMMIT TRANSACTION;
+GO
+
+
+-- =======================================================
+-- Verification queries
+-- =======================================================
+
+-- Full picture, ordered by passenger and version
+SELECT PassengerId, FrequentFlyerTier, HomeAirportCode, EffectiveFrom, EffectiveTo, IsCurrent
+FROM dw.DimPassenger
+ORDER BY PassengerId, EffectiveFrom;
+
+-- No passenger should ever have more than one current row
+SELECT PassengerId, COUNT(*) 
+FROM dw.DimPassenger 
+WHERE IsCurrent = 1 
+GROUP BY PassengerId 
+HAVING COUNT(*) > 1;
+
+Reference: Assignment-2-Reference--Question-4
+
+*************************************************************
+The sales fact is the biggest table in the warehouse. Partition it by date using a partition function and a partition scheme. Then run two queries: one that filters on the partition key, and one that filters on a non-partition column. Acceptance criteria: a partition function and scheme exist and the fact sits on the scheme; you show, using the actual execution plan, that the first query prunes to a small number of partitions and the second does not, and you explain why
+*************************************************************
+
+/* ============================================================
+   PARTITIONING ASSIGNMENT - flights_db
+   Table: dw.FactTicketSales_Partitioned
+   Partitioned by: TravelDateKey (quarterly)
+   ============================================================ */
+
+USE [flights_db];
+GO
+
+
+/* ============================================================
+   PART 1: SETUP
+   ============================================================ */
+
+-- Clean up existing objects so the script can be re-run cleanly
+IF OBJECT_ID('dw.FactTicketSales_Partitioned', 'U') IS NOT NULL
+    DROP TABLE dw.FactTicketSales_Partitioned;
+GO
+
+IF EXISTS (SELECT 1 FROM sys.partition_schemes WHERE name = 'PS_FactTravelDate')
+    DROP PARTITION SCHEME PS_FactTravelDate;
+GO
+
+IF EXISTS (SELECT 1 FROM sys.partition_functions WHERE name = 'PF_FactTravelDate')
+    DROP PARTITION FUNCTION PF_FactTravelDate;
+GO
+
+-- 1.1 Create the partition function (quarterly boundaries)
+-- RANGE RIGHT: boundary value belongs to the partition on the right
+CREATE PARTITION FUNCTION PF_FactTravelDate (int)
+AS RANGE RIGHT FOR VALUES 
+(
+    20250101,   -- 2025 Q1 starts
+    20250401,   -- 2025 Q2 starts
+    20250701,   -- 2025 Q3 starts
+    20251001,   -- 2025 Q4 starts
+    20260101,   -- 2026 Q1 starts
+    20260401    -- 2026 Q2 starts
+);
+GO
+
+-- 1.2 Create the partition scheme (maps partitions to PRIMARY)
+CREATE PARTITION SCHEME PS_FactTravelDate
+AS PARTITION PF_FactTravelDate
+ALL TO ([PRIMARY]);
+GO
+
+-- 1.3 Create the partitioned fact table
+-- The partitioning column (TravelDateKey) MUST be part of the clustered PK
+CREATE TABLE [dw].[FactTicketSales_Partitioned](
+    TicketSalesKey   bigint IDENTITY(1,1) NOT NULL,
+    BookingId        bigint NOT NULL,
+    PassengerKey     int NOT NULL,
+    FlightKey        int NOT NULL,
+    OriginAirportKey int NOT NULL,
+    DestAirportKey   int NOT NULL,
+    AircraftKey      int NOT NULL,
+    BookingDateKey   int NOT NULL,
+    TravelDateKey    int NOT NULL,
+    FareClass        nvarchar(50) NULL,
+    BookingStatus    nvarchar(50) NULL,
+    FareAmount       decimal(18,2) NULL,
+    TaxAmount        decimal(18,2) NULL,
+    MilesEarned      bigint NULL,
+    CONSTRAINT PK_FactTicketSales_Partitioned
+        PRIMARY KEY CLUSTERED (TicketSalesKey, TravelDateKey)
+        ON PS_FactTravelDate(TravelDateKey)
+);
+GO
+
+-- 1.4 Copy existing rows from the original fact table
+-- Rows automatically land in the correct partition based on TravelDateKey
+INSERT INTO [dw].[FactTicketSales_Partitioned]
+    (BookingId, PassengerKey, FlightKey, OriginAirportKey, DestAirportKey,
+     AircraftKey, BookingDateKey, TravelDateKey, FareClass, BookingStatus,
+     FareAmount, TaxAmount, MilesEarned)
+SELECT
+     BookingId, PassengerKey, FlightKey, OriginAirportKey, DestAirportKey,
+     AircraftKey, BookingDateKey, TravelDateKey, FareClass, BookingStatus,
+     FareAmount, TaxAmount, MilesEarned
+FROM [dw].[FactTicketSales];
+GO
+
+
+/* ============================================================
+   PART 2: VERIFY PARTITION FUNCTION AND SCHEME EXIST
+   ============================================================ */
+
+-- 2.1 Partition function exists
+SELECT pf.name AS PartitionFunctionName, pf.fanout AS NumberOfPartitions
+FROM sys.partition_functions pf
+WHERE pf.name = 'PF_FactTravelDate';
+GO
+
+-- 2.2 Partition scheme exists
+SELECT ps.name AS PartitionSchemeName, pf.name AS PartitionFunctionName
+FROM sys.partition_schemes ps
+JOIN sys.partition_functions pf ON ps.function_id = pf.function_id
+WHERE ps.name = 'PS_FactTravelDate';
+GO
+
+-- 2.3 Fact table sits on the partition scheme
+SELECT
+    i.name       AS IndexName,
+    ds.name      AS DataSpaceName,      -- should be PS_FactTravelDate
+    ds.type_desc AS DataSpaceType,      -- should be PARTITION_SCHEME
+    c.name       AS PartitioningColumn  -- should be TravelDateKey
+FROM sys.indexes i
+JOIN sys.data_spaces ds ON i.data_space_id = ds.data_space_id
+JOIN sys.index_columns ic
+     ON ic.object_id = i.object_id
+    AND ic.index_id = i.index_id
+    AND ic.partition_ordinal = 1
+JOIN sys.columns c
+     ON c.object_id = ic.object_id
+    AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID('dw.FactTicketSales_Partitioned');
+GO
+
+-- 2.4 Rows per partition
+SELECT p.partition_number AS PartitionNumber, p.rows AS RowsInPartition
+FROM sys.partitions p
+WHERE OBJECT_NAME(p.object_id) = 'FactTicketSales_Partitioned'
+  AND p.index_id IN (0,1)
+ORDER BY p.partition_number;
+GO
+
+
+/* ============================================================
+   PART 3: QUERY 1 - FILTER ON PARTITION KEY (TravelDateKey)
+   ============================================================ */
+
+SET STATISTICS XML ON;
+
+SELECT TicketSalesKey, BookingId, TravelDateKey, FareAmount, TaxAmount
+FROM [dw].[FactTicketSales_Partitioned]
+WHERE TravelDateKey >= 20250401 AND TravelDateKey <= 20250630;
+
+SET STATISTICS XML OFF;
+GO
+
+
+
+/* ============================================================
+   PART 4: QUERY 2 - FILTER ON NON-PARTITION COLUMN (BookingDateKey)
+   ============================================================ */
+
+SET STATISTICS XML ON;
+
+SELECT TicketSalesKey, BookingId, BookingDateKey, FareAmount, TaxAmount
+FROM [dw].[FactTicketSales_Partitioned]
+WHERE BookingDateKey >= 20250401 AND BookingDateKey <= 20250630;
+
+Reference Screenshots: Assignment-2-Reference--Question-6, Assignment-2-Reference-1-Question-6, Assignment-2-Reference-2-Question-6
+
+
+********************************************************************
+Two written deliverables.
+(a) Map every table in this pipeline to a medallion layer (bronze, silver, or gold) and say in a line why each sits where. (b) Write a data contract for the bronze_bookings feed. Acceptance criteria: every table is assigned a layer with a short reason; the contract states the schema and types, the allowed values for fare_class and booking_status, a freshness or delivery SLA, the owner, and one example each of a breaking and a non-breaking change.
+********************************************************************
+
+Medallion Layers & Data Contract
+
+(a) Layer Mapping
+
+Bronze layer (raw):
+- bronze_aircraft — direct load, no cleaning
+- bronze_airports — raw feed as received
+- bronze_bookings — raw booking transactions
+- bronze_flights — raw flight schedule dump
+- bronze_passengers — raw passenger records
+- stg_passenger_updates — staging for incoming changes
+
+Gold layer:
+- DimAircraft — cleaned dimension with surrogate key
+- DimAirport — denormalized airport dimension
+- DimAirportSnowflake — snowflake version of airport
+- DimCity — cleaned city dimension
+- DimCountry — cleaned country lookup
+- DimDate — built date dimension
+- DimFlight — cleaned flight dimension
+- DimPassenger — cleaned passenger with SCD2
+- FactTicketSales — main fact table
+
+No silver layer — bronze goes straight to gold through ETL.
+
+(b) Data Contract — bronze_bookings
+
+Feed: Booking transactions from airline reservation system
+Consumer: DW ETL loading FactTicketSales
+
+--Schema:
+- booking_id (bigint)
+- passenger_id (bigint)
+- flight_id (bigint)
+- booking_date (date)
+- travel_date (date)
+- fare_class (nvarchar 255)
+- fare_amount (decimal 18,2)
+- tax_amount (decimal 18,2)
+- booking_status (nvarchar 255)
+- miles_earned (bigint)
+
+All columns nullable by design — bad rows land and get quarantined in ETL.
+
+--Allowed values:
+- fare_class: Economy, Premium Economy, Business, First
+- booking_status: Confirmed, Cancelled, Pending, Refunded, No-Show
+
+--SLA:
+- Delivery every 15 minutes
+- Must land within 30 minutes of source creation
+- 24-hour backfill available on request
+
+--Owner:
+- Data owner: Airline Reservations Team
+- Steward: DW Engineering
+- Escalation: data-engineering@airline.example
+
+--Breaking change:
+- Renaming `booking_status` to `status` — ETL and FactTicketSales reference it by name, would require coordinated changes
+
+--Non-breaking change:
+- Adding a nullable `channel` column (nvarchar 50) — existing consumers ignore unknown columns, nothing breaks
